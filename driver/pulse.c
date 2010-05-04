@@ -32,6 +32,7 @@
 #include <linux/cdev.h>
 #include <linux/fs.h>
 #include <linux/errno.h>
+#include <linux/ctype.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
 #include <linux/moduleparam.h>
@@ -358,42 +359,15 @@ static ssize_t pulse_read(struct file *filp, char __user *buff, size_t count,
 
 	return error;	
 }
+
 /*
   Input: pwm8_us[:pwm9_us][:pwm10_us][:pwm11_us]
 */
-static ssize_t pulse_write(struct file *filp, const char __user *buff, 
-			size_t count, loff_t *offp)
+static void process_pulse_lengths(void)
 {
-	size_t len;
 	int i;
-	unsigned int pulse_length_us;
 	char *pos, *s;
-	ssize_t error = 0;
-	
-	if (down_interruptible(&pulse_dev.sem)) 
-		return -ERESTARTSYS;
-
-	if (!buff || count < 1) {
-		printk(KERN_ALERT "pwm_write(): input check failed\n");
-		error = -EFAULT; 
-		goto pwm_write_done;
-	}
-	
-	len = USER_BUFF_SIZE - 1;
-
-	/* we are only expecting a small integer, ignore anything else */
-	if (count < len)
-		len = count;
-		
-	memset(pulse_dev.user_buff, 0, USER_BUFF_SIZE);
-
-	if (copy_from_user(pulse_dev.user_buff, buff, len)) {
-		printk(KERN_ALERT "pwm_write(): copy_from_user() failed\n"); 
-		error = -EFAULT; 	
-		goto pwm_write_done;
-	}
-
-	pulse_off();
+	unsigned int pulse_length_us;
 
 	pos = pulse_dev.user_buff;
 
@@ -411,19 +385,104 @@ static ssize_t pulse_write(struct file *filp, const char __user *buff,
 
 	for (i++; i < NUM_PWM_TIMERS; i++) 
 		set_pulse_length(i, 0);
+}
 
-	pulse_on();
+/*
+  Input: dpwm8_delay:pwm9_delay[:pwm10_delay][:pwm11_delay]
+*/
+static void process_pulse_delays(void)
+{
+	int i;
+	char *pos, *s;
+	unsigned int delay[NUM_PWM_TIMERS], max_delay;
 
+	memset(delay, 0, sizeof(delay));
+	max_delay = 0;
+
+	/* skip overo the 'd' */
+	pos = &pulse_dev.user_buff[1];
+
+	for (i = 0; i < NUM_PWM_TIMERS; i++) {	
+		s = strsep(&pos, ":"); 
+
+		if (s) {
+			delay[i] = simple_strtoul(s, NULL, 0);
+			
+			if (delay[i] > max_delay)
+				max_delay = delay[i];
+		}
+
+		if (!pos)
+			break;
+	}	
+
+	/* 
+	  Because of the way we are setting up the delays using
+	  TCRR = TLDR + an offset, we have to 'reverse' these delays
+	  so that they happen sequentially.
+	*/
+	for (i = 0; i < NUM_PWM_TIMERS; i++)
+		pulse_dev.gpt[i].offset = (1000 * (max_delay - delay[i]))
+					/ CLOCK_PERIOD_NS;
+}
+
+static ssize_t pulse_write(struct file *filp, const char __user *buff, 
+			size_t count, loff_t *offp)
+{
+	size_t len;
+	ssize_t status = 0;
+	
+	if (down_interruptible(&pulse_dev.sem)) 
+		return -ERESTARTSYS;
+
+	if (!buff || count < 1) {
+		printk(KERN_ALERT "pwm_write(): input check failed\n");
+		status = -EFAULT; 
+		goto pwm_write_done;
+	}
+	
+	len = USER_BUFF_SIZE - 1;
+
+	/* we are only expecting a small integer, ignore anything else */
+	if (count < len)
+		len = count;
+		
+	memset(pulse_dev.user_buff, 0, USER_BUFF_SIZE);
+
+	if (copy_from_user(pulse_dev.user_buff, buff, len)) {
+		printk(KERN_ALERT "pwm_write(): copy_from_user() failed\n"); 
+		status = -EFAULT; 	
+		goto pwm_write_done;
+	}
+
+	if (!strncasecmp(pulse_dev.user_buff, "on", 2)) {
+		pulse_on();
+	}
+	else if (!strncasecmp(pulse_dev.user_buff, "off", 3)) {
+		pulse_off();
+	}
+	else {
+		pulse_off();
+
+		if (isdigit(pulse_dev.user_buff[0])) 
+			process_pulse_lengths();
+		else if (pulse_dev.user_buff[0] == 'd')
+			process_pulse_delays();
+		else 
+			printk(KERN_ALERT "pulse_write() unknown command %s\n",
+				pulse_dev.user_buff);
+	}
+	
 	/* pretend we ate it all */
 	*offp += count;
 
-	error = count;
+	status = count;
 
 pwm_write_done:
 
 	up(&pulse_dev.sem);
 	
-	return error;
+	return status;
 }
 
 static int pulse_ioctl(struct inode *inode, struct file *filp, 
@@ -505,6 +564,8 @@ static int __init pulse_init_class(void)
  
 static int pulse_init_timers(void)
 {
+	int i;
+
 	if (use_sys_clk()) 
 		return -1;
 	
@@ -519,6 +580,9 @@ static int pulse_init_timers(void)
 		return -1;
 	}
 	
+	for (i = 0; i < NUM_PWM_TIMERS; i++) 
+		set_pulse_length(i, 100);
+
 	return 0;
 }
 
