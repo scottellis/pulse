@@ -1,0 +1,24 @@
+Generate some square pulses using the Overo PWM outputs with a slow frequency
+and very small duty cycle.
+
+For example, I want a 100 usec signal on PWM8 and a 150 usec signal on PWM9
+that starts 20 usec after the PWM8 signal.
+
+          ___________
+         |           |
+PWM8 ____|           |___________________________________________
+
+            ________________
+           |                |
+PWM9 ______|                |____________________________________
+
+
+The driver is a kernel module that allows me to control the PWM timers
+to get this kind of behavior.
+
+The control program will provide a simpler interface to the kernel
+module.
+
+This is for generating some test signals for some other equipment
+I am working on, but this piece is pretty generic.
+
