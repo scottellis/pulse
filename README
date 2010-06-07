@@ -14,7 +14,7 @@ PWM9 ______|                |____________________________________
 
 
 The driver is a kernel module that allows me to control the PWM timers
-to get this kind of behavior.
+to get this kind of behavior.  
 
 The control program will provide a simpler interface to the kernel
 module.
