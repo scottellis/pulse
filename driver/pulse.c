@@ -55,8 +55,9 @@
 #define DEFAULT_TMAR	0xFFFFFFEF
 
 /* default TCLR is off state */
-#define DEFAULT_TCLR (GPT_TCLR_PT | GPT_TCLR_TRG_OVFL_MATCH | GPT_TCLR_CE \
-			| GPT_TCLR_AR) 
+#define DEFAULT_TCLR (GPT_TCLR_PT | GPT_TCLR_TRG_OVFL_MATCH | GPT_TCLR_CE | GPT_TCLR_AR) 
+#define SCPWM_TCLR (DEFAULT_TCLR | GPT_TCLR_SCPWM) 
+
 
 #define DEFAULT_PWM_FREQUENCY 2
 
@@ -471,7 +472,6 @@ static ssize_t pulse_write(struct file *filp, const char __user *buff,
 				pulse_dev.user_buff);
 	}
 	
-	/* pretend we ate it all */
 	*offp += count;
 
 	status = count;
@@ -602,14 +602,14 @@ static int __init pulse_init(void)
 	pulse_dev.gpt[PWM8].mux_offset = GPT8_MUX_OFFSET;
 	pulse_dev.gpt[PWM8].gpt_base = PWM8_CTL_BASE;
 	pulse_dev.gpt[PWM8].input_freq = CLK_SYS_FREQ;
-	pulse_dev.gpt[PWM8].tclr = DEFAULT_TCLR;
+	pulse_dev.gpt[PWM8].tclr = SCPWM_TCLR;
 	pulse_dev.gpt[PWM8].offset = 1950;
 
 	pulse_dev.gpt[PWM9].timer_num = 9;
 	pulse_dev.gpt[PWM9].mux_offset = GPT9_MUX_OFFSET;
 	pulse_dev.gpt[PWM9].gpt_base = PWM9_CTL_BASE;
 	pulse_dev.gpt[PWM9].input_freq = CLK_SYS_FREQ;
-	pulse_dev.gpt[PWM9].tclr = DEFAULT_TCLR;
+	pulse_dev.gpt[PWM9].tclr = SCPWM_TCLR;
 	pulse_dev.gpt[PWM9].offset = 1300;
 
 	pulse_dev.gpt[PWM10].timer_num = 10;
