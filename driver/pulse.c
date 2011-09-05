@@ -28,6 +28,7 @@
 #include <linux/init.h> 
 #include <linux/module.h>
 #include <linux/device.h>
+#include <linux/slab.h>
 #include <linux/semaphore.h>
 #include <linux/cdev.h>
 #include <linux/fs.h>
@@ -54,7 +55,8 @@
 #define DEFAULT_TMAR	0xFFFFFFEF
 
 /* default TCLR is off state */
-#define DEFAULT_TCLR (GPT_TCLR_PT | GPT_TCLR_TRG_OVFL_MATCH | GPT_TCLR_CE | GPT_TCLR_AR) 
+#define DEFAULT_TCLR (GPT_TCLR_PT | GPT_TCLR_TRG_OVFL_MATCH | GPT_TCLR_CE \
+			| GPT_TCLR_AR) 
 
 #define DEFAULT_PWM_FREQUENCY 2
 
@@ -80,6 +82,7 @@ struct gpt {
 	u32 tclr;
 	u32 num_freqs;
 	u32 offset;
+	void __iomem *base;
 };
 
 struct pulse_dev {
@@ -177,10 +180,36 @@ static int restore_32k_clk(void)
 	return 0;
 }
 
+static int map_timers(void)
+{
+	int i;
+
+	for (i = 0; i < NUM_PWM_TIMERS; i++) {
+		pulse_dev.gpt[i].base = ioremap(pulse_dev.gpt[i].gpt_base, 
+						GPT_REGS_PAGE_SIZE);
+
+		if (!pulse_dev.gpt[i].base)
+			return -1;
+	}
+
+	return 0;
+}
+
+static void unmap_timers(void)
+{
+	int i;
+
+	for (i = 0; i < NUM_PWM_TIMERS; i++) {
+		if (pulse_dev.gpt[i].base) {
+			iounmap(pulse_dev.gpt[i].base);
+			pulse_dev.gpt[i].base = NULL;
+		}
+	}		
+}
+
 static int set_pwm_frequency(void)
 {
 	int i;
-	void __iomem *base;
 
 	if (frequency < 0) {
 		frequency = DEFAULT_PWM_FREQUENCY;
@@ -192,15 +221,6 @@ static int set_pwm_frequency(void)
 	}
 
 	for (i = 0; i < NUM_PWM_TIMERS; i++) {
-		base = ioremap(pulse_dev.gpt[i].gpt_base, GPT_REGS_PAGE_SIZE);
-	
-		if (!base) {
-			printk(KERN_ALERT 
-				"set_pwm_frequency(): ioremap failed\n");
-			return -1;
-		}
-
-
 		/* PWM_FREQ = 32768 / ((0xFFFF FFFF - TLDR) + 1) */
 		pulse_dev.gpt[i].tldr = 0xFFFFFFFF - 
 			((pulse_dev.gpt[i].input_freq / frequency) - 1);
@@ -209,9 +229,8 @@ static int set_pwm_frequency(void)
 		pulse_dev.gpt[i].num_freqs = 0xFFFFFFFE 
 						- pulse_dev.gpt[i].tldr;	
 
-		iowrite32(pulse_dev.gpt[i].tldr, base + GPT_TLDR);
-
-		iounmap(base);
+		iowrite32(pulse_dev.gpt[i].tldr, 
+				pulse_dev.gpt[i].base + GPT_TLDR);
 	}
 
 	return 0;
@@ -220,18 +239,11 @@ static int set_pwm_frequency(void)
 static int pulse_off(void)
 {
 	int i;
-	void __iomem *base;
 
 	for (i = 0; i < NUM_PWM_TIMERS; i++) {
-		base = ioremap(pulse_dev.gpt[i].gpt_base, GPT_REGS_PAGE_SIZE);
-		if (!base) {
-			printk(KERN_ALERT "pwm_off(): ioremap failed\n");
-			return -1;
-		}
-
 		pulse_dev.gpt[i].tclr &= ~GPT_TCLR_ST;
-		iowrite32(pulse_dev.gpt[i].tclr, base + GPT_TCLR); 
-		iounmap(base);
+		iowrite32(pulse_dev.gpt[i].tclr, 
+				pulse_dev.gpt[i].base + GPT_TCLR); 
 	}
 
 	return 0;
@@ -239,48 +251,33 @@ static int pulse_off(void)
 
 static int pulse_on(void)
 {
-	int i, status;
-	void __iomem *base[NUM_PWM_TIMERS];
-	
-	for (i = 0; i < NUM_PWM_TIMERS; i++) 
-		base[i] = NULL;
+	int i;
 
 	for (i = 0; i < NUM_PWM_TIMERS; i++) {
 		if (pulse_dev.gpt[i].tmar == 0)
 			continue;
 
-		base[i] = ioremap(pulse_dev.gpt[i].gpt_base, GPT_REGS_PAGE_SIZE);
-		if (!base[i]) {
-			printk(KERN_ALERT "pwm_on(): ioremap failed\n");
-			status = -1;
-			goto pulse_on_done;	
-		}
-
 		/* set the duty cycle */
-		iowrite32(pulse_dev.gpt[i].tmar, base[i] + GPT_TMAR);
+		iowrite32(pulse_dev.gpt[i].tmar, 
+				pulse_dev.gpt[i].base + GPT_TMAR);
 	
 		/* initialize TCRR to TLDR, have to start somewhere */
 		iowrite32(pulse_dev.gpt[i].tldr + pulse_dev.gpt[i].offset, 
-				base[i] + GPT_TCRR);
+				pulse_dev.gpt[i].base + GPT_TCRR);
 		
 		/* now turn it on */
-		pulse_dev.gpt[i].tclr = ioread32(base[i] + GPT_TCLR);
+		pulse_dev.gpt[i].tclr = ioread32(pulse_dev.gpt[i].base 
+								+ GPT_TCLR);
 		pulse_dev.gpt[i].tclr |= GPT_TCLR_ST;
 	}
 
-	for (i = 0; i < NUM_PWM_TIMERS; i++) 
-		if (base[i])
-			iowrite32(pulse_dev.gpt[i].tclr, base[i] + GPT_TCLR); 
+	/* try to turn them all on at once */
+	for (i = 0; i < NUM_PWM_TIMERS; i++) { 
+		iowrite32(pulse_dev.gpt[i].tclr, 
+					pulse_dev.gpt[i].base + GPT_TCLR); 
+	}
 
-	status = 0;
-
-pulse_on_done:
-
-	for (i = 0; i < NUM_PWM_TIMERS; i++) 
-		if (base[i])	
-			iounmap(base[i]);
-
-	return status;
+	return 0;
 }
 
 static int set_pulse_length(unsigned int timer, unsigned int pulse_length_us) 
@@ -301,7 +298,8 @@ static int set_pulse_length(unsigned int timer, unsigned int pulse_length_us)
 		else if (new_tmar > pulse_dev.gpt[timer].num_freqs)
 			new_tmar = pulse_dev.gpt[timer].num_freqs;
 		
-		pulse_dev.gpt[timer].tmar = pulse_dev.gpt[timer].tldr + new_tmar;
+		pulse_dev.gpt[timer].tmar = pulse_dev.gpt[timer].tldr 
+						+ new_tmar;
 	}
 
 	return 0;
@@ -485,8 +483,7 @@ pwm_write_done:
 	return status;
 }
 
-static int pulse_ioctl(struct inode *inode, struct file *filp, 
-			unsigned int cmd, unsigned long arg) 
+static long pulse_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) 
 {
 	printk(KERN_ALERT "pulse_ioctl(%d)\n", cmd);
 
@@ -515,7 +512,7 @@ static struct file_operations pulse_fops = {
 	.owner = THIS_MODULE,
 	.read = pulse_read,
 	.write = pulse_write,
-	.ioctl = pulse_ioctl,
+	.unlocked_ioctl = pulse_ioctl,
 	.open = pulse_open,
 };
 
@@ -574,7 +571,15 @@ static int pulse_init_timers(void)
 		return -1;
 	}
 
+	if (map_timers()) {
+		unmap_timers();
+		restore_mux();
+		restore_32k_clk();
+		return -1;
+	}
+
 	if (set_pwm_frequency()) {
+		unmap_timers();
 		restore_mux();
 		restore_32k_clk();
 		return -1;
@@ -656,6 +661,7 @@ static void __exit pulse_exit(void)
 	unregister_chrdev_region(pulse_dev.devt, 1);
 
 	pulse_off();
+	unmap_timers();
 	restore_mux();
 	
 	restore_32k_clk();
